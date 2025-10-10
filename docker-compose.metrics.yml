@@ -1,3 +1,4 @@
+name: Newt-Metrics
 services:
   # Recommended Variant A: Direct Prometheus scrape of Newt (/metrics)
   # Optional: You may add the Collector service and enable OTLP export, but do NOT
