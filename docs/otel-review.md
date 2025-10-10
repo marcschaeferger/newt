@@ -1,129 +1,110 @@
-# Newt OpenTelemetry Review
+# Newt OpenTelemetry Review (combined)
 
 ## Overview
 
-This document summarises the current OpenTelemetry (OTel) instrumentation in Newt, assesses
-compliance with OTel guidelines, and lists concrete improvements to pursue before release.
-It is based on the implementation in `internal/telemetry` and the call-sites that emit
-metrics and traces across the code base.
+Dieses kombinierte Dokument fasst die narrative Review aus `otel-review.md` zusammen
+und enthält das komplette Metrik-Inventar aus `temp.md` als Referenz-Appendix. Es
+beinhaltet: eine kurze Übersicht, Tracing-Footprint, Guideline-Check, ein vollständiges
+Metrik-Inventar, Lücken/Empfehlungen und eine priorisierte Backlog-Liste.
 
-## Current metric instrumentation
+Zielgruppe: Architekt:innen, SREs und Entwickler:innen, die Instrumentation prüfen, priorisieren
+oder implementieren wollen.
 
-All instruments are registered in `internal/telemetry/metrics.go`. They are grouped
-into site, tunnel, connection, configuration, build, WebSocket, and proxy domains.
-A global attribute filter (see `buildMeterProvider`) constrains exposed label keys to
-`site_id`, `region`, and a curated list of low-cardinality dimensions so that Prometheus
-exports stay bounded.
+## Kurz: Aktueller Stand der Instrumentation
 
-- **Site lifecycle**: `newt_site_registrations_total`, `newt_site_online`, and
-  `newt_site_last_heartbeat_timestamp_seconds` capture registration attempts and liveness. They
-  are fed either manually (`IncSiteRegistration`) or via the `TelemetryView` state
-  callback that publishes observable gauges for the active site.
-- **Tunnel health and usage**: Counters and histograms track bytes, latency, reconnects,
-  and active sessions per tunnel (`newt_tunnel_*` family). Attribute helpers respect
-  the `NEWT_METRICS_INCLUDE_TUNNEL_ID` toggle to keep cardinality manageable on larger
-  fleets.
-- **Connection attempts**: `newt_connection_attempts_total` and
-  `newt_connection_errors_total` are emitted throughout the WebSocket client to classify
-  authentication, dial, and transport failures.
-- **Operations/configuration**: `newt_config_reloads_total`,
-  `process_start_time_seconds`, `newt_config_apply_seconds`, and
-  `newt_cert_rotation_total` provide visibility into blueprint reloads, process boots,
-  configuration timings, and certificate rotation outcomes.
-- **Build metadata**: `newt_build_info` records the binary version/commit together
-  with optional site metadata when build information is supplied at startup.
-- **WebSocket control-plane**: `newt_websocket_connect_latency_seconds`,
-  `newt_websocket_messages_total`, `newt_websocket_connected`, and
-  `newt_websocket_reconnects_total` report connect latency, ping/pong/text activity,
-  connection state, and reconnect reasons.
-- **Proxy data-plane**: Observable gauges (`newt_proxy_active_connections`,
-  `newt_proxy_buffer_bytes`, `newt_proxy_async_backlog_bytes`) plus counters for
-  drops, accepts, connection lifecycle events (`newt_proxy_connections_total`), and
-  duration histograms (`newt_proxy_connection_duration_seconds`) surface backlog,
-  drop behaviour, and churn alongside per-protocol byte counters.
+- Alle Instrumente werden in `internal/telemetry/metrics.go` registriert und gruppiert
+  (site, tunnel, connection, config, build, websocket, proxy).
+- Ein globaler Attributfilter begrenzt exponierte Label auf eine erlaubte Liste
+  (`site_id`, `region` + kuratierte Dimensions) um Prometheus-Cardinality zu
+  begrenzen.
+- Tracing ist optional (OTLP) und derzeit begrenzt auf WebSocket-Connect und den
+  Admin-HTTP-Handler (`/metrics`, `/healthz`).
 
-Refer to `docs/observability.md` for a tabular catalogue with instrument types,
-attributes, and sample exposition lines.
+## Metric inventory
 
-## Tracing coverage
+Die folgende Tabelle listet jedes registrierte Instrument, die Pfade/Helper, die es
+emittieren, und ein Beispiel für eine Zeitreihe. Attribute fügen standardmäßig `site_id`
+und optional `region` hinzu.
 
-Tracing is optional and enabled only when OTLP export is configured. When active:
+| Metric | Instrument & unit | Purpose | Emission path | Example series |
+| --- | --- | --- | --- | --- |
+| `newt_site_registrations_total` | Counter | Counts Pangolin registration attempts keyed by result (`success`, `failure`). | `telemetry.IncSiteRegistration` (called after registration completes). | `newt_site_registrations_total{result="success",site_id="abc"} 1` |
+| `newt_site_online` | Observable gauge | 0/1 heartbeat for the active site, driven by the registered `StateView`. | `telemetry.SetObservableCallback` via `state.TelemetryView`. | `newt_site_online{site_id="self"} 1` |
+| `newt_site_last_heartbeat_seconds` | Observable gauge | Seconds since the last Pangolin heartbeat. | Same callback as above using `state.TelemetryView.TouchHeartbeat`. | `newt_site_last_heartbeat_seconds{site_id="self"} 3.2` |
+| `newt_tunnel_sessions` | Observable gauge | Active sessions per tunnel; collapses to site total when `tunnel_id` emission is disabled. | `state.TelemetryView.SessionsByTunnel` via `RegisterStateView`. | `newt_tunnel_sessions{site_id="self",tunnel_id="wgpub"} 2` |
+| `newt_tunnel_bytes_total` | Counter (`By`) | Traffic accounting per tunnel, direction (`ingress`/`egress`), protocol (`tcp`/`udp`). | Proxy manager counting writers (`AddTunnelBytes`/`AddTunnelBytesSet`). | `newt_tunnel_bytes_total{direction="egress",protocol="tcp",site_id="self",tunnel_id="wgpub"} 8192` |
+| `newt_tunnel_latency_seconds` | Histogram (`s`) | RTT samples from WireGuard stack and health pings per tunnel/transport. | `telemetry.ObserveTunnelLatency` from tunnel health checks. | `newt_tunnel_latency_seconds_bucket{transport="wireguard",le="0.05",tunnel_id="wgpub"} 4` |
+| `newt_tunnel_reconnects_total` | Counter | Reconnect attempts bucketed by initiator (`client`/`server`) and reason enums. | `telemetry.IncReconnect` across websocket, WG, and utility flows. | `newt_tunnel_reconnects_total{initiator="client",reason="timeout",tunnel_id="wgpub"} 3` |
+| `newt_connection_attempts_total` | Counter | Auth and WebSocket attempt counts by transport (`auth`, `websocket`) and result (`success`/`failure`). | `telemetry.IncConnAttempt` in auth/token and dial paths. | `newt_connection_attempts_total{transport="websocket",result="failure",site_id="self"} 2` |
+| `newt_connection_errors_total` | Counter | Connection error tally keyed by transport and canonical error type (`dial_timeout`, `tls_handshake`, `auth_failed`, `io_error`). | `telemetry.IncConnError` in auth/websocket flows. | `newt_connection_errors_total{transport="auth",error_type="auth_failed",site_id="self"} 1` |
+| `newt_config_reloads_total` | Counter | Successful/failed config reload attempts. | `telemetry.IncConfigReload` during WireGuard config reloads. | `newt_config_reloads_total{result="success",site_id="self"} 1` |
+| `newt_restart_count_total` | Counter | Bumps to 1 at process boot for build info scrapers. | `telemetry.RegisterBuildInfo` called from `Init`. | `newt_restart_count_total{site_id="self"} 1` |
+| `newt_config_apply_seconds` | Histogram (`s`) | Measures interface/peer apply duration per phase and result. | `telemetry.ObserveConfigApply` around config updates. | `newt_config_apply_seconds_bucket{phase="peer",result="success",le="0.1"} 5` |
+| `newt_cert_rotation_total` | Counter | Certificate rotation events tagged by result. | `telemetry.IncCertRotation` during PKI updates. | `newt_cert_rotation_total{result="success",site_id="self"} 1` |
+| `newt_build_info` | Observable gauge | Constant 1 with `version`/`commit` attributes to expose build metadata. | Callback registered in `registerBuildWSProxyInstruments`. | `newt_build_info{version="1.2.3",commit="abc123",site_id="self"} 1` |
+| `newt_websocket_connect_latency_seconds` | Histogram (`s`) | Dial latency for Pangolin WebSocket connects annotated with result/error_type. | `telemetry.ObserveWSConnectLatency` inside `Client.establishConnection`. | `newt_websocket_connect_latency_seconds_bucket{result="success",transport="websocket",le="0.5"} 1` |
+| `newt_websocket_messages_total` | Counter | Counts inbound/outbound WebSocket messages by direction and logical message type. | `telemetry.IncWSMessage` for ping/pong/text events. | `newt_websocket_messages_total{direction="out",msg_type="ping",site_id="self"} 4` |
+| `newt_proxy_active_connections` | Observable gauge | Active TCP/UDP proxy connections per tunnel and protocol. | Proxy manager callback via `SetProxyObservableCallback`. | `newt_proxy_active_connections{protocol="tcp",tunnel_id="wgpub"} 3` |
+| `newt_proxy_buffer_bytes` | Observable gauge (`By`) | Size of proxy buffer pools (synchronous path) per tunnel/protocol. | Same proxy callback as above. | `newt_proxy_buffer_bytes{protocol="tcp",tunnel_id="wgpub"} 10240` |
+| `newt_proxy_async_backlog_bytes` | Observable gauge (`By`) | Unflushed async byte backlog when deferred accounting is enabled. | Proxy callback when async accounting is turned on. | `newt_proxy_async_backlog_bytes{protocol="udp",tunnel_id="wgpub"} 4096` |
+| `newt_proxy_drops_total` | Counter | Proxy write-drop events per protocol/tunnel. | `telemetry.IncProxyDrops` on UDP drop paths. | `newt_proxy_drops_total{protocol="udp",tunnel_id="wgpub"} 2` |
 
-- The admin HTTP mux is wrapped with `otelhttp.NewHandler`, producing spans for
-  `/metrics` and `/healthz` requests.
-- The WebSocket dial path creates a `ws.connect` span around the gRPC-based handshake.
+In addition, Go runtime metrics are automatically exported when telemetry is initialised.
 
-No other subsystems currently create spans, so data-plane operations, blueprint fetches,
-Docker discovery, and WireGuard reconfiguration happen without trace context.
+## Tracing footprint
+
+- Tracing ist nur aktiv, wenn OTLP-Export konfiguriert ist; `telemetry.Init` wired einen Batch TracerProvider.
+- Der Admin HTTP-Server ist mit `otelhttp.NewHandler` gewrappt, damit Admin-Requests Spans erzeugen.
+- Der WebSocket-Dial erzeugt einen `ws.connect`-Span. Viele Control- und Data-Pfade sind noch uninstrumentiert.
 
 ## Guideline & best-practice alignment
 
-The implementation adheres to most OTel Go recommendations:
+- Naming & units: Instrumente folgen `newt_*` Konventionen; Counters `_total`, Durs `_seconds`.
+- Resource attributes: `site_id`, `region` und Build-Metainfos werden gesetzt.
+- Attribute hygiene: Ein allow-list View limitiert Label-Keys.
+- Runtime metrics & shutdown: Runtime-Instrumentation aktiv; Shutdown draint Exporter.
 
-- **Naming & units** – Every instrument follows the `newt_*` prefix with `_total`
-  suffixes for counters and `_seconds`/`_bytes` unit conventions. Histograms are
-  registered with explicit second-based buckets.
-- **Resource attributes** – Service name/version and optional `site_id`/`region`
-  populate the `resource.Resource`. Metric labels mirror these by default (and on
-  per-site gauges) but can be disabled with `NEWT_METRICS_INCLUDE_SITE_LABELS=false`
-  to avoid unnecessary cardinality growth.
-- **Attribute hygiene** – A single attribute filter (`sdkmetric.WithView`) enforces
-  the allow-list of label keys to prevent accidental high-cardinality emission.
-- **Runtime metrics** – Go runtime instrumentation is enabled automatically through
-  `runtime.Start`.
-- **Configuration via environment** – `telemetry.FromEnv` honours `OTEL_*` variables
-  alongside `NEWT_*` overrides so operators can configure exporters without code
-  changes.
-- **Shutdown handling** – `Setup.Shutdown` iterates exporters in reverse order to
-  flush buffers before process exit.
+## Gaps & recommended improvements
 
-## Adjustments & improvements
+Die wichtigsten Lücken (zusammengeführt aus beiden Quellen):
 
-The review identified a few actionable adjustments:
+1. Registration failures: `newt_site_registrations_total` muss auch `result="failure"` bei fehlgeschlagenen Registrierungen emittieren.
+2. Config reload visibility: Fehlerpfade bei Blueprint-Parsing/-Apply sollten Metriken/Fehlercounter erhöhen.
+3. Context propagation: Viele Helpers nutzen `context.Background()` — besser echte Contexts propagieren.
+4. Tracing coverage: Blueprint downloads, WireGuard reconfiguration, Docker discovery, Proxy accept/dial sollten Spans erhalten.
+5. Proxy telemetry: Mehr Counters für accept/bind errors ergänzen `newt_proxy_drops_total`.
+6. Histogram coverage: Bootstrap latency, websocket session duration, ping RTT sollten als Histograms ergänzt werden.
+7. Docker discovery metrics: Container add/remove/error counters wenn Discovery aktiviert ist.
 
-1. **Record registration failures** – `newt_site_registrations_total` is currently
-   incremented only on success. Emit `result="failure"` samples whenever Pangolin
-   rejects a registration or credential exchange so operators can alert on churn.
-2. **Surface config reload failures** – `telemetry.IncConfigReload` is invoked with
-   `result="success"` only. Callers should record a failure result when blueprint
-   parsing or application aborts before success counters are incremented.
-3. **Expose robust uptime** – Document using `time() - process_start_time_seconds`
-   to derive uptime now that the restart counter has been replaced with a timestamp
-   gauge.
-4. **Propagate contexts where available** – Many emitters call metric helpers with
-   `context.Background()`. Passing real contexts (when inexpensive) would allow future
-   exporters to correlate spans and metrics.
-5. **Extend tracing coverage** – Instrument critical flows such as blueprint fetches,
-   WireGuard reconfiguration, proxy accept loops, and Docker discovery to provide end
-   to end visibility when OTLP tracing is enabled.
+## Priorisierte Pre-release Backlog (empfohlen)
 
-## Metrics to add before release
+1. Bootstrap latency: `newt_site_registration_latency_seconds` (histogram) um Control-plane Latenzen zu messen.
+2. Session duration: `newt_websocket_session_duration_seconds` um Verbindungslanglebigkeit zu überwachen.
+3. Heartbeat/ping latency: `newt_ping_roundtrip_seconds` für Tunnel-Health SLOs.
+4. Proxy accept errors: `newt_proxy_accept_errors_total{protocol,reason}` für Listener-Probleme.
+5. Discovery events: `newt_discovery_events_total{action,source}` für Inventar-Churn.
 
-Prioritised additions that would close visibility gaps:
+## Concrete implementation notes
 
-1. **Config reload error taxonomy** – Split reload attempts into a dedicated
-   `newt_config_reload_errors_total{phase}` counter to make blueprint validation failures
-   visible alongside the existing success counter.
-2. **Config source visibility** – Export `newt_config_source_info{source,version}` so
-   operators can audit the active blueprint origin/commit during incidents.
-3. **Certificate expiry** – Emit `newt_cert_expiry_timestamp_seconds` (per cert) to
-   enable proactive alerts before mTLS credentials lapse.
-4. **Blueprint/config pull latency** – Measuring Pangolin blueprint fetch durations and
-   HTTP status distribution would expose slow control-plane operations.
-5. **Tunnel setup latency** – Histograms for DNS resolution and tunnel handshakes would
-   help correlate connect latency spikes with network dependencies.
-
-These metrics rely on data that is already available in the code paths mentioned
-above and would round out operational dashboards.
+- Keep cardinality low: use allow-lists and optional `NEWT_METRICS_INCLUDE_TUNNEL_ID` toggles.
+- Use consistent units and buckets (reuse existing latency bucket boundaries).
+- Prefer recording failure/success with label `result` to enable simple SLIs/alerts.
 
 ## Tracing wishlist
 
-To benefit from tracing when OTLP is active, add spans around:
+Span targets (to enable end-to-end traces when OTLP aktiv ist):
 
-- Pangolin REST calls (wrap the HTTP client with `otelhttp.NewTransport`).
-- Docker discovery cycles and target registration callbacks.
-- WireGuard reconfiguration (interface bring-up, peer updates).
-- Proxy dial/accept loops for both TCP and UDP targets.
+- Pangolin REST calls (wrap HTTP transport with `otelhttp.NewTransport`).
+- Blueprint fetch & apply paths.
+- WireGuard handshake / peer apply.
+- Docker discovery & registration callbacks.
+- Proxy accept/dial loops.
 
-Capturing these stages will let operators correlate latency spikes with reconnects
-and proxy drops using distributed traces in addition to the metric signals.
+## Next steps / Vorschlag
+
+- Nutze dieses Dokument als Kombination aus Executive Summary und Appendix.
+- Vorschlag: `temp.md` als machine-readable CSV/appendix exportieren und diese Datei als primären Review-Text beibehalten.
+- Ich kann daraus auf Wunsch eine PR-Checkliste / Issues-Liste erzeugen (Priority + owner).
+
+---
+_Quelle:_ Inhalte aus `internal/telemetry` + Review-Notizen (zusammengeführt).
