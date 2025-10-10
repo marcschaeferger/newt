@@ -142,8 +142,8 @@ var (
 	adminAddr         string
 	region            string
 	metricsAsyncBytes bool
-	blueprintFile                      string
-	noCloud                            bool
+	blueprintFile     string
+	noCloud           bool
 
 	// New mTLS configuration variables
 	tlsClientCert string
@@ -169,10 +169,6 @@ func main() {
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
 	generateAndSaveKeyTo = os.Getenv("GENERATE_AND_SAVE_KEY_TO")
-	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
-	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
-	useNativeInterfaceEnv := os.Getenv("USE_NATIVE_INTERFACE")
-	enforceHealthcheckCertEnv := os.Getenv("ENFORCE_HC_CERT")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -181,6 +177,7 @@ func main() {
 	regionEnv := os.Getenv("NEWT_REGION")
 	asyncBytesEnv := os.Getenv("NEWT_METRICS_ASYNC_BYTES")
 
+	keepInterfaceEnv := os.Getenv("KEEP_INTERFACE")
 	keepInterface = keepInterfaceEnv == "true"
 	acceptClientsEnv := os.Getenv("ACCEPT_CLIENTS")
 	acceptClients = acceptClientsEnv == "true"
