@@ -7,3 +7,6 @@ nohup.out
 certs/
 newt_arm64
 .env
+docs/MetricList.md
+docs/Metrics-ToDo.md
+examples/grafana/dashboards/newt-dashboard-2.json
