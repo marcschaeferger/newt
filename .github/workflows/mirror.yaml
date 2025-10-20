@@ -28,7 +28,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
 
-      - name: Check inputs
+      - name: Input check
         run: |
           test -n "${SOURCE_IMAGE}" || (echo "SOURCE_IMAGE is empty" && exit 1)
           echo "Source : ${SOURCE_IMAGE}"
@@ -38,11 +38,10 @@ jobs:
         run: |
           skopeo login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
 
-      # Optional: only needed for private/rate-limited pulls
+      # Optional (private/rate-limited pulls):
       # - name: Login to Docker Hub
       #   if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
-      #   run: |
-      #     skopeo login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
+      #   run: skopeo login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" -p "${{ secrets.DOCKERHUB_TOKEN }}"
 
       - name: List source tags
         run: |
@@ -69,14 +68,15 @@ jobs:
           test -n "${COSIGN_PRIVATE_KEY_B64}" || (echo "Secret COSIGN_PRIVATE_KEY_B64 is missing" && exit 1)
           echo "${COSIGN_PRIVATE_KEY_B64}" | base64 -d > cosign.key
           chmod 600 cosign.key
-          echo "cosign.key written."
+          echo "cosign.key ready."
 
-      - name: Mirror & sign (recursive)
+      - name: Mirror & dual-sign (keyless + key)
         env:
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}   # passphrase used when generating the key
+          COSIGN_YES: "true"                  # auto-confirm prompts
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}  # passphrase for cosign.key
         run: |
           set -euo pipefail
-          copied=0; skipped=0; signed=0; errs=0
+          copied=0; skipped=0; signed_keyless=0; signed_key=0; errs=0
 
           while read -r tag; do
             [ -z "$tag" ] && continue
@@ -91,26 +91,34 @@ jobs:
             if ! skopeo copy --all --retry-times 3 \
                  docker://"${SOURCE_IMAGE}:${tag}" docker://"${DEST_IMAGE}:${tag}"; then
               echo "::warning title=Copy failed::${SOURCE_IMAGE}:${tag}"
-              errs=$((errs+1))
-              continue
+              errs=$((errs+1)); continue
             fi
             copied=$((copied+1))
 
-            # Sign by digest (stable reference). --recursive signs index + child images
+            # Resolve digest and sign that immutable ref
             digest="$(skopeo inspect --retry-times 3 docker://"${DEST_IMAGE}:${tag}" | jq -r '.Digest')"
             ref="${DEST_IMAGE}@${digest}"
 
-            echo "==> cosign sign --key ./cosign.key --recursive ${ref}"
-            if cosign sign --key ./cosign.key --recursive "${ref}"; then
-              signed=$((signed+1))
+            echo "==> cosign sign (keyless) --recursive ${ref}"
+            if cosign sign --recursive "${ref}"; then
+              signed_keyless=$((signed_keyless+1))
             else
-              echo "::warning title=Sign failed::${ref}"
+              echo "::warning title=Keyless sign failed::${ref}"
+              errs=$((errs+1))
+            fi
+
+            echo "==> cosign sign (key) --recursive ${ref}"
+            if cosign sign --key ./cosign.key --recursive "${ref}"; then
+              signed_key=$((signed_key+1))
+            else
+              echo "::warning title=Key sign failed::${ref}"
               errs=$((errs+1))
             fi
           done < src-tags.txt
 
           echo "---- Summary ----"
-          echo "Copied : $copied"
-          echo "Skipped: $skipped"
-          echo "Signed : $signed"
-          echo "Errors : $errs"
+          echo "Copied           : $copied"
+          echo "Skipped (exists) : $skipped"
+          echo "Signed (keyless) : $signed_keyless"
+          echo "Signed (key)     : $signed_key"
+          echo "Errors           : $errs"
