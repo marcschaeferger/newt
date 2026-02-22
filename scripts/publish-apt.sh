@@ -138,12 +138,29 @@ gpg --batch --yes --armor --export "${KEYID}" > "${WORKDIR}/repo/apt/public.key"
 
 # Upload to S3
 echo "Uploading to S3..."
+# Verify the S3 bucket exists and is accessible before attempting sync to give a clearer error
+echo "Checking S3 bucket '${S3_BUCKET}' accessibility..."
+if ! aws s3api head-bucket --bucket "${S3_BUCKET}" >/dev/null 2>&1; then
+  echo "ERROR: S3 bucket '${S3_BUCKET}' does not exist or is not accessible with the configured AWS credentials/role."
+  echo "Confirm the bucket name, region (", ${AWS_REGION}, ") and that the assumed role has s3:ListBucket and s3:PutObject permissions."
+  echo "If the bucket should be created, you can run locally (adjust region as needed):"
+  echo "  # For us-east-1 (no LocationConstraint):"
+  echo "  aws s3api create-bucket --bucket ${S3_BUCKET} --region ${AWS_REGION}"
+  echo "  # For other regions:"
+  echo "  aws s3api create-bucket --bucket ${S3_BUCKET} --region ${AWS_REGION} --create-bucket-configuration LocationConstraint=${AWS_REGION}"
+  exit 1
+fi
+
 aws s3 sync "${WORKDIR}/repo/apt" "s3://${S3_BUCKET}/${S3_PREFIX}apt/" --delete
 
 # Invalidate metadata
 echo "CloudFront invalidation..."
-aws cloudfront create-invalidation \
-  --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
-  --paths "/${S3_PREFIX}apt/dists/*" "/${S3_PREFIX}apt/public.key"
+if ! aws cloudfront get-distribution --id "${CLOUDFRONT_DISTRIBUTION_ID}" >/dev/null 2>&1; then
+  echo "WARNING: CloudFront distribution '${CLOUDFRONT_DISTRIBUTION_ID}' not found or not accessible; skipping invalidation."
+else
+  aws cloudfront create-invalidation \
+    --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
+    --paths "/${S3_PREFIX}apt/dists/*" "/${S3_PREFIX}apt/public.key"
+fi
 
 echo "Done. Repo base: ${REPO_BASE_URL}"
