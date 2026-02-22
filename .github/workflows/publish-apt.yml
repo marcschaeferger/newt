@@ -61,4 +61,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
           APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-        run: ./scripts/publish-apt.sh
+        # Run via bash to avoid 'Permission denied' if the script isn't executable in the runner
+        run: bash -eux ./scripts/publish-apt.sh
