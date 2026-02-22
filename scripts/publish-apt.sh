@@ -139,16 +139,41 @@ gpg --batch --yes --armor --export "${KEYID}" > "${WORKDIR}/repo/apt/public.key"
 # Upload to S3
 echo "Uploading to S3..."
 # Verify the S3 bucket exists and is accessible before attempting sync to give a clearer error
-echo "Checking S3 bucket '${S3_BUCKET}' accessibility..."
-if ! aws s3api head-bucket --bucket "${S3_BUCKET}" >/dev/null 2>&1; then
-  echo "ERROR: S3 bucket '${S3_BUCKET}' does not exist or is not accessible with the configured AWS credentials/role."
-  echo "Confirm the bucket name, region (", ${AWS_REGION}, ") and that the assumed role has s3:ListBucket and s3:PutObject permissions."
-  echo "If the bucket should be created, you can run locally (adjust region as needed):"
-  echo "  # For us-east-1 (no LocationConstraint):"
-  echo "  aws s3api create-bucket --bucket ${S3_BUCKET} --region ${AWS_REGION}"
-  echo "  # For other regions:"
-  echo "  aws s3api create-bucket --bucket ${S3_BUCKET} --region ${AWS_REGION} --create-bucket-configuration LocationConstraint=${AWS_REGION}"
-  exit 1
+echo "Checking S3 bucket '${S3_BUCKET}' and prefix '${S3_PREFIX}apt/' accessibility using prefix-scoped ListObjectsV2..."
+# Use list-objects-v2 scoped to the repo prefix. This works with IAM policies that grant s3:ListBucket with a prefix condition.
+if ! aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix "${S3_PREFIX}apt/" --max-items 1 >/dev/null 2>&1; then
+  if [[ "${CREATE_BUCKET:-false}" == "true" ]]; then
+    echo "S3 bucket '${S3_BUCKET}' not found or inaccessible. CREATE_BUCKET=true so attempting to create it in region ${AWS_REGION}..."
+    if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+      if ! aws s3api create-bucket --bucket "${S3_BUCKET}" --region "${AWS_REGION}"; then
+        echo "ERROR: Failed to create S3 bucket ${S3_BUCKET} in ${AWS_REGION}."
+        exit 1
+      fi
+    else
+      if ! aws s3api create-bucket --bucket "${S3_BUCKET}" --region "${AWS_REGION}" --create-bucket-configuration LocationConstraint="${AWS_REGION}"; then
+        echo "ERROR: Failed to create S3 bucket ${S3_BUCKET} in ${AWS_REGION} (LocationConstraint=${AWS_REGION})."
+        exit 1
+      fi
+    fi
+
+    echo "Waiting for bucket to become accessible..."
+    tries=0
+    until aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix "${S3_PREFIX}apt/" --max-items 1 >/dev/null 2>&1; do
+      tries=$((tries+1))
+      if [[ ${tries} -ge 10 ]]; then
+        echo "ERROR: Bucket ${S3_BUCKET} still not accessible after creation attempts."
+        exit 1
+      fi
+      sleep 2
+    done
+    echo "Bucket ${S3_BUCKET} is now accessible."
+  else
+    echo "ERROR: S3 bucket '${S3_BUCKET}' does not exist or is not accessible with the configured AWS credentials/role for the prefix '${S3_PREFIX}apt/'."
+    echo "Your IAM policy must allow 's3:ListBucket' on arn:aws:s3:::${S3_BUCKET} with a condition like s3:prefix=['${S3_PREFIX}apt/*'] or broader."
+    echo "If you prefer not to change IAM, you can create the bucket manually (example):"
+    echo "  aws s3api create-bucket --bucket ${S3_BUCKET} --region ${AWS_REGION}"
+    exit 1
+  fi
 fi
 
 aws s3 sync "${WORKDIR}/repo/apt" "s3://${S3_BUCKET}/${S3_PREFIX}apt/" --delete
