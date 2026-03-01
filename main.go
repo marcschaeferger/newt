@@ -116,6 +116,7 @@ var (
 	logLevel                           string
 	interfaceName                      string
 	port                               uint16
+	portStr                            string
 	disableClients                     bool
 	updownScript                       string
 	dockerSocket                       string
@@ -136,6 +137,7 @@ var (
 	authDaemonPrincipalsFile           string
 	authDaemonCACertPath               string
 	authDaemonEnabled                  bool
+	authDaemonGenerateRandomPassword   bool
 	// Build/version (can be overridden via -ldflags "-X main.newtVersion=...")
 	newtVersion = "version_replaceme"
 
@@ -210,11 +212,12 @@ func runNewtMain(ctx context.Context) {
 	logLevel = os.Getenv("LOG_LEVEL")
 	updownScript = os.Getenv("UPDOWN_SCRIPT")
 	interfaceName = os.Getenv("INTERFACE")
-	portStr := os.Getenv("PORT")
+	portStr = os.Getenv("PORT")
 	authDaemonKey = os.Getenv("AD_KEY")
 	authDaemonPrincipalsFile = os.Getenv("AD_PRINCIPALS_FILE")
 	authDaemonCACertPath = os.Getenv("AD_CA_CERT_PATH")
 	authDaemonEnabledEnv := os.Getenv("AUTH_DAEMON_ENABLED")
+	authDaemonGenerateRandomPasswordEnv := os.Getenv("AD_GENERATE_RANDOM_PASSWORD")
 
 	// Metrics/observability env mirrors
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
@@ -418,6 +421,13 @@ func runNewtMain(ctx context.Context) {
 	} else {
 		if v, err := strconv.ParseBool(authDaemonEnabledEnv); err == nil {
 			authDaemonEnabled = v
+		}
+	}
+	if authDaemonGenerateRandomPasswordEnv == "" {
+		flag.BoolVar(&authDaemonGenerateRandomPassword, "ad-generate-random-password", false, "Generate a random password for authenticated users")
+	} else {
+		if v, err := strconv.ParseBool(authDaemonGenerateRandomPasswordEnv); err == nil {
+			authDaemonGenerateRandomPassword = v
 		}
 	}
 
@@ -1378,15 +1388,18 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 
 		// Define the structure of the incoming message
 		type SSHCertData struct {
-			MessageId int    `json:"messageId"`
-			AgentPort int    `json:"agentPort"`
-			AgentHost string `json:"agentHost"`
-			CACert    string `json:"caCert"`
-			Username  string `json:"username"`
-			NiceID    string `json:"niceId"`
-			Metadata  struct {
-				Sudo    bool `json:"sudo"`
-				Homedir bool `json:"homedir"`
+			MessageId          int    `json:"messageId"`
+			AgentPort          int    `json:"agentPort"`
+			AgentHost          string `json:"agentHost"`
+			ExternalAuthDaemon bool   `json:"externalAuthDaemon"`
+			CACert             string `json:"caCert"`
+			Username           string `json:"username"`
+			NiceID             string `json:"niceId"`
+			Metadata           struct {
+				SudoMode     string   `json:"sudoMode"`
+				SudoCommands []string `json:"sudoCommands"`
+				Homedir      bool     `json:"homedir"`
+				Groups       []string `json:"groups"`
 			} `json:"metadata"`
 		}
 
@@ -1406,7 +1419,7 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 		}
 
 		// Check if we're running the auth daemon internally
-		if authDaemonServer != nil {
+		if authDaemonServer != nil && !certData.ExternalAuthDaemon { // if the auth daemon is running internally and the external auth daemon is not enabled
 			// Call ProcessConnection directly when running internally
 			logger.Debug("Calling internal auth daemon ProcessConnection for user %s", certData.Username)
 
@@ -1415,8 +1428,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				NiceId:   certData.NiceID,
 				Username: certData.Username,
 				Metadata: authdaemon.ConnectionMetadata{
-					Sudo:    certData.Metadata.Sudo,
-					Homedir: certData.Metadata.Homedir,
+					SudoMode:     certData.Metadata.SudoMode,
+					SudoCommands: certData.Metadata.SudoCommands,
+					Homedir:      certData.Metadata.Homedir,
+					Groups:       certData.Metadata.Groups,
 				},
 			})
 
@@ -1450,8 +1465,10 @@ persistent_keepalive_interval=5`, util.FixKey(privateKey.String()), util.FixKey(
 				"niceId":   certData.NiceID,
 				"username": certData.Username,
 				"metadata": map[string]interface{}{
-					"sudo":    certData.Metadata.Sudo,
-					"homedir": certData.Metadata.Homedir,
+					"sudoMode":     certData.Metadata.SudoMode,
+					"sudoCommands": certData.Metadata.SudoCommands,
+					"homedir":      certData.Metadata.Homedir,
+					"groups":       certData.Metadata.Groups,
 				},
 			}
 
