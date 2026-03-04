@@ -75,7 +75,7 @@ jobs:
           hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
 
           # Sizing/location
-          server_type: cx32
+          server_type: cx33
           location: fsn1
           image: ubuntu-24.04
 
