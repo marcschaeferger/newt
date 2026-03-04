@@ -216,8 +216,8 @@ jobs:
     runs-on: ${{ needs.create-runner-x86.outputs.label }}
     timeout-minutes: 120
     env:
-      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       is_rc: ${{ steps.tag.outputs.is_rc }}
@@ -343,8 +343,8 @@ jobs:
     runs-on: ${{ needs.create-runner-arm.outputs.label }}
     timeout-minutes: 120
     env:
-      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
 
     steps:
       - name: Checkout code
@@ -449,8 +449,8 @@ jobs:
     runs-on: ${{ needs.create-runner-x86.outputs.label }}
     timeout-minutes: 30
     env:
-      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
       TAG: ${{ needs.build-amd.outputs.tag }}
       IS_RC: ${{ needs.build-amd.outputs.is_rc }}
       MAJOR_TAG: ${{ needs.build-amd.outputs.major }}
@@ -531,8 +531,8 @@ jobs:
     runs-on: ${{ needs.create-runner-x86.outputs.label }}
     timeout-minutes: 120
     env:
-      DOCKERHUB_IMAGE: docker.io/fosrl/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+      DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
       TAG: ${{ needs.build-amd.outputs.tag }}
       IS_RC: ${{ needs.build-amd.outputs.is_rc }}
     steps:
@@ -593,7 +593,7 @@ jobs:
         continue-on-error: true
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
-          subject-name: index.docker.io/fosrl/${{ github.event.repository.name }}
+          subject-name: index.docker.io/marcschaeferger/${{ github.event.repository.name }}
           subject-digest: ${{ env.DH_DIGEST }}
           push-to-registry: true
           show-summary: true
