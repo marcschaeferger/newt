@@ -292,7 +292,6 @@ jobs:
           echo "TAG=$TAG" >> $GITHUB_ENV
 
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
@@ -351,7 +350,6 @@ jobs:
       PUBLISH_MINOR:  ${{ github.event_name == 'workflow_dispatch' && inputs.publish_minor  || vars.PUBLISH_MINOR  }}
     steps:
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
@@ -382,7 +380,6 @@ jobs:
           docker manifest push "${GHCR_IMAGE}:${TAG}"
 
       - name: Create manifest for Docker Hub (:TAG)
-        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -453,7 +450,6 @@ jobs:
           go-version-file: go.mod
 
       - name: Log in to Docker Hub
-        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
