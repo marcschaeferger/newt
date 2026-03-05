@@ -624,18 +624,18 @@ jobs:
     name: Stop AWS EC2 runners
     needs: [pre-run, prepare, build-amd, build-arm, create-manifest, sign-and-release]
     if: >-
-      ${{
-        always() &&
-        (needs.pre-run.result == 'success'  &&
-        (needs.build-amd.result == 'success' || needs.build-amd.result == 'failure' || needs.build-amd.result == 'cancelled') || 
-         needs.build-amd.result != 'skipped') &&
-        (needs.build-arm.result == 'success' || needs.build-arm.result == 'failure' || needs.build-arm.result == 'cancelled') ||
-        needs.build-arm.result != 'skipped') &&
-        (needs.create-manifest.result == 'success' || needs.create-manifest.result == 'failure' || needs.create-manifest.result == 'cancelled') ||
-        needs.create-manifest.result != 'skipped') &&
-        (needs.sign-and-release.result == 'success' || needs.sign-and-release.result == 'failure' || needs.sign-and-release.result == 'cancelled') ||
-        needs.sign-and-release.result != 'skipped')
-      }}
+        ${{
+          always() &&
+          (needs.pre-run.result == 'success'  &&
+          (needs.build-amd.result == 'success' || needs.build-amd.result == 'failure' || needs.build-amd.result == 'cancelled') || 
+          needs.build-amd.result != 'skipped') &&
+          (needs.build-arm.result == 'success' || needs.build-arm.result == 'failure' || needs.build-arm.result == 'cancelled') ||
+          needs.build-arm.result != 'skipped') &&
+          (needs.create-manifest.result == 'success' || needs.create-manifest.result == 'failure' || needs.create-manifest.result == 'cancelled') ||
+          needs.create-manifest.result != 'skipped') &&
+          (needs.sign-and-release.result == 'success' || needs.sign-and-release.result == 'failure' || needs.sign-and-release.result == 'cancelled') ||
+          needs.sign-and-release.result != 'skipped')
+        }}
     runs-on: ubuntu-latest
     permissions: write-all
     steps:
