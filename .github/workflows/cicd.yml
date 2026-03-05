@@ -1,27 +1,21 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (AWS Self-Hosted Runners)
 
-# CI/CD workflow for building, publishing, signing container images and building release binaries
-# using ephemeral self-hosted GitHub runners provisioned on Hetzner Cloud.
-#
-# Key ideas:
-# - Create 2 short-lived runners per run: one x86_64 and one arm64.
-# - Run "prepare" + the heavy multi-arch build job on x86 (QEMU handles arm64/armv7).
-#   (ARM runner is optional if you later split builds by architecture; kept here because you asked for it.)
-# - Always destroy runners in a final job (even on failure) to avoid cost leaks.
+# CI/CD workflow for building, publishing, attesting, signing container images and building release binaries.
+# Native multi-arch pipeline using two AWS EC2 self-hosted runners (x86_64 + arm64) to build and push architecture-specific images in parallel, then create multi-arch manifests.
 #
 # Required secrets:
-# - PERSONAL_ACCESS_TOKEN: Fine-grained GitHub PAT with permissions to manage self-hosted runners for the repo
-# - HCLOUD_TOKEN: Hetzner Cloud API token (Read & Write)
-# - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN: optional push to Docker Hub
-# - GITHUB_TOKEN: GHCR login + keyless signing/attestations
-# - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY: key-based signing
+# - AWS_ACCOUNT_ID, AWS_ROLE_NAME, AWS_REGION
+# - EC2_INSTANCE_ID_AMD_RUNNER, EC2_INSTANCE_ID_ARM_RUNNER
+# - DOCKER_HUB_USERNAME / DOCKER_HUB_ACCESS_TOKEN
+# - GITHUB_TOKEN
+# - COSIGN_PRIVATE_KEY / COSIGN_PASSWORD / COSIGN_PUBLIC_KEY
 
 permissions:
-  contents: write          # gh-release (draft release)
+  contents: write          # gh-release
   packages: write          # GHCR push
   id-token: write          # Keyless-Signatures & Attestations (OIDC)
   attestations: write      # actions/attest-build-provenance
-  security-events: write   # upload-sarif (currently commented out)
+  security-events: write   # upload-sarif
   actions: read
 
 on:
@@ -33,21 +27,21 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "SemVer version to release (e.g., 1.2.3, no leading 'v')"
+        description: "Version to release (X.Y.Z or X.Y.Z-rc.N)"
         required: true
         type: string
       publish_latest:
-        description: "Also publish the 'latest' image tag"
+        description: "Publish latest tag (non-RC only)"
         required: true
         type: boolean
         default: false
       publish_minor:
-        description: "Also publish the 'major.minor' image tag (e.g., 1.2)"
+        description: "Publish minor tag (X.Y) (non-RC only)"
         required: true
         type: boolean
         default: false
       target_branch:
-        description: "Branch to tag (dispatch only)"
+        description: "Branch to tag"
         required: false
         default: "main"
 
@@ -57,116 +51,37 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1) Provision ephemeral Hetzner Cloud runners (x86_64 + arm64)
+  # 1) Start AWS EC2 runner instances
   # ---------------------------------------------------------------------------
-  create-runner-x86:
-    name: Create Hetzner Cloud runner (x86_64)
+  pre-run:
+    name: Start AWS EC2 runners
     runs-on: ubuntu-latest
-    outputs:
-      label: ${{ steps.create.outputs.label }}
-      server_id: ${{ steps.create.outputs.server_id }}
+    permissions: write-all
     steps:
-      - name: Create x86 runner on Hetzner
-        id: create
-        uses: Cyclenerd/hcloud-github-runner@v1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
         with:
-          mode: create
-          github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-duration-seconds: 3600
+          aws-region: ${{ secrets.AWS_REGION }}
 
-          # Sizing/location
-          server_type: cx33
-          location: fsn1
-          image: ubuntu-24.04
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
-          # Runner bootstrap (install only what’s needed for your workflow)
-          # Note: Docker Buildx is typically available once docker is installed,
-          # but if you hit Buildx issues you may need to install docker-buildx-plugin explicitly.
-          pre_runner_script: |
-            #!/usr/bin/env bash
-            set -Eeuo pipefail
-            export DEBIAN_FRONTEND=noninteractive
-
-            apt-get update -y
-            apt-get install -y --no-install-recommends \
-              ca-certificates \
-              curl \
-              git \
-              jq \
-              make \
-              build-essential \
-              docker.io \
-              skopeo \
-              qemu-user-static \
-              binfmt-support
-
-            systemctl enable docker
-            systemctl start docker
-
-            # Optional: show versions (helpful for debugging)
-            docker --version || true
-            git --version || true
-            jq --version || true
-            make --version || true
-            skopeo --version || true
-
-            rm -rf /var/lib/apt/lists/*
-
-  create-runner-arm:
-    name: Create Hetzner Cloud runner (arm64)
-    runs-on: ubuntu-latest
-    outputs:
-      label: ${{ steps.create.outputs.label }}
-      server_id: ${{ steps.create.outputs.server_id }}
-    steps:
-      - name: Create ARM runner on Hetzner
-        id: create
-        uses: Cyclenerd/hcloud-github-runner@v1
-        with:
-          mode: create
-          github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
-
-          server_type: cax21
-          location: fsn1
-          image: ubuntu-24.04
-
-          pre_runner_script: |
-            #!/usr/bin/env bash
-            set -Eeuo pipefail
-            export DEBIAN_FRONTEND=noninteractive
-
-            apt-get update -y
-            apt-get install -y --no-install-recommends \
-              ca-certificates \
-              curl \
-              git \
-              jq \
-              make \
-              build-essential \
-              docker.io \
-              skopeo
-
-            systemctl enable docker
-            systemctl start docker
-
-            docker --version || true
-            git --version || true
-            jq --version || true
-            make --version || true
-            skopeo --version || true
-
-            rm -rf /var/lib/apt/lists/*
+      - name: Start EC2 instances
+        run: |
+          aws ec2 start-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
+          aws ec2 start-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
+          echo "EC2 instances started"
 
   # ---------------------------------------------------------------------------
-  # 2) Prepare release (dispatch only): create annotated tag on target branch
-  #    Runs on x86 runner (no reason to do this on GH hosted runners)
+  # 2) Prepare release
   # ---------------------------------------------------------------------------
   prepare:
     if: github.event_name == 'workflow_dispatch'
     name: Prepare release (create tag)
-    needs: [create-runner-x86]
-    runs-on: ${{ needs.create-runner-x86.outputs.label }}
+    needs: [pre-run]
+    runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
     steps:
@@ -207,17 +122,17 @@ jobs:
           git push origin "refs/tags/$VERSION"
 
   # ---------------------------------------------------------------------------
-  # 3) Build per-arch images (native) on ephemeral runners
+  # 3) Build and Release (x86 job)
   # ---------------------------------------------------------------------------
   build-amd:
     name: Build image (linux/amd64)
-    needs: [create-runner-x86, prepare]
-    if: ${{ needs.create-runner-x86.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
-    runs-on: ${{ needs.create-runner-x86.outputs.label }}
+    needs: [pre-run, prepare]
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 120
     env:
       DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       is_rc: ${{ steps.tag.outputs.is_rc }}
@@ -239,6 +154,8 @@ jobs:
           if [ "$USED_SPACE" -ge "$THRESHOLD" ]; then
             echo "Disk usage >= ${THRESHOLD}%, pruning docker..."
             echo y | docker system prune -a || true
+          else
+            echo "Disk usage < ${THRESHOLD}%, no action needed."
           fi
 
       - name: Determine tag + rc/major/minor
@@ -274,31 +191,19 @@ jobs:
           echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
 
           echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "IS_RC=$IS_RC" >> $GITHUB_ENV
+          echo "MAJOR_TAG=$MAJOR" >> $GITHUB_ENV
+          echo "MINOR_TAG=$MINOR" >> $GITHUB_ENV
 
-      - name: Ensure repository is at the tagged commit (dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+      - name: Capture created timestamp
+        run: echo "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
         shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
-          git checkout "refs/tags/${TAG}"
-          echo "Checked out $(git rev-parse --short HEAD) for tag ${TAG}"
 
-      - name: Update version in server/lib/consts.ts (if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f server/lib/consts.ts ]; then
-            sed -i "s/export const APP_VERSION = \".*\";/export const APP_VERSION = \"${TAG}\";/" server/lib/consts.ts
-          fi
+      #- name: Set up QEMU
+      #  uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
-      - name: Update version in main.go (if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f main.go ]; then
-            sed -i 's/version_replaceme/'"${TAG}"'/' main.go
-          fi
+      #- name: Set up Docker Buildx
+      #  uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -324,7 +229,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
+      # Build ONLY amd64 and push arch-specific tag suffixes used later for manifest creation.
       - name: Build and push (amd64 -> *:amd64-TAG)
+        id: build_amd
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -336,16 +243,18 @@ jobs:
           cache-from: type=gha,scope=${{ github.repository }}-amd64
           cache-to: type=gha,mode=max,scope=${{ github.repository }}-amd64
 
+  # ---------------------------------------------------------------------------
+  # 4) Build ARM64 image natively on ARM runner
+  # ---------------------------------------------------------------------------
   build-arm:
     name: Build image (linux/arm64)
-    needs: [create-runner-arm, prepare]
-    if: ${{ needs.create-runner-arm.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
-    runs-on: ${{ needs.create-runner-arm.outputs.label }}
+    needs: [pre-run, prepare]
+    if: ${{ needs.pre-run.result == 'success' && ((github.event_name == 'push' && github.actor != 'github-actions[bot]') || (github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success')) }}
+    runs-on: [self-hosted, linux, arm64] # NOTE: ensure label exists on runner
     timeout-minutes: 120
     env:
       DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
-
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -382,31 +291,8 @@ jobs:
 
           echo "TAG=$TAG" >> $GITHUB_ENV
 
-      - name: Ensure repository is at the tagged commit (dispatch only)
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --tags --force
-          git checkout "refs/tags/${TAG}"
-
-      - name: Update version in server/lib/consts.ts (if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f server/lib/consts.ts ]; then
-            sed -i "s/export const APP_VERSION = \".*\";/export const APP_VERSION = \"${TAG}\";/" server/lib/consts.ts
-          fi
-
-      - name: Update version in main.go (if present)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f main.go ]; then
-            sed -i 's/version_replaceme/'"${TAG}"'/' main.go
-          fi
-
       - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
@@ -430,7 +316,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
+      # Build ONLY arm64 and push arch-specific tag suffixes used later for manifest creation.
       - name: Build and push (arm64 -> *:arm64-TAG)
+        id: build_arm
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -442,23 +330,28 @@ jobs:
           cache-from: type=gha,scope=${{ github.repository }}-arm64
           cache-to: type=gha,mode=max,scope=${{ github.repository }}-arm64
 
+  # ---------------------------------------------------------------------------
+  # 5) Create and push multi-arch manifests (TAG, plus optional latest/major/minor)
+  # ---------------------------------------------------------------------------
   create-manifest:
     name: Create multi-arch manifests
     needs: [build-amd, build-arm]
     if: ${{ needs.build-amd.result == 'success' && needs.build-arm.result == 'success' }}
-    runs-on: ${{ needs.create-runner-x86.outputs.label }}
+    runs-on: [self-hosted, linux, x64] # NOTE: ensure label exists on runner
     timeout-minutes: 30
     env:
       DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
       TAG: ${{ needs.build-amd.outputs.tag }}
       IS_RC: ${{ needs.build-amd.outputs.is_rc }}
       MAJOR_TAG: ${{ needs.build-amd.outputs.major }}
       MINOR_TAG: ${{ needs.build-amd.outputs.minor }}
+      # workflow_dispatch controls are respected only here (tagging policy)
       PUBLISH_LATEST: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_latest || vars.PUBLISH_LATEST }}
       PUBLISH_MINOR:  ${{ github.event_name == 'workflow_dispatch' && inputs.publish_minor  || vars.PUBLISH_MINOR  }}
     steps:
       - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
@@ -489,6 +382,7 @@ jobs:
           docker manifest push "${GHCR_IMAGE}:${TAG}"
 
       - name: Create manifest for Docker Hub (:TAG)
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -497,6 +391,7 @@ jobs:
             --amend "${DOCKERHUB_IMAGE}:arm64-${TAG}"
           docker manifest push "${DOCKERHUB_IMAGE}:${TAG}"
 
+      # Optional tags for non-RC releases: latest, major, minor
       - name: Publish additional tags (non-RC only)
         if: ${{ env.IS_RC != 'true' }}
         shell: bash
@@ -513,26 +408,33 @@ jobs:
           fi
 
           for t in "${tags_to_publish[@]}"; do
+            echo "Publishing GHCR tag ${t} -> ${TAG}"
             docker manifest create "${GHCR_IMAGE}:${t}" \
               --amend "${GHCR_IMAGE}:amd64-${TAG}" \
               --amend "${GHCR_IMAGE}:arm64-${TAG}"
             docker manifest push "${GHCR_IMAGE}:${t}"
 
-            docker manifest create "${DOCKERHUB_IMAGE}:${t}" \
-              --amend "${DOCKERHUB_IMAGE}:amd64-${TAG}" \
-              --amend "${DOCKERHUB_IMAGE}:arm64-${TAG}"
-            docker manifest push "${DOCKERHUB_IMAGE}:${t}"
+            if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
+              echo "Publishing Docker Hub tag ${t} -> ${TAG}"
+              docker manifest create "${DOCKERHUB_IMAGE}:${t}" \
+                --amend "${DOCKERHUB_IMAGE}:amd64-${TAG}" \
+                --amend "${DOCKERHUB_IMAGE}:arm64-${TAG}"
+              docker manifest push "${DOCKERHUB_IMAGE}:${t}"
+            fi
           done
 
+  # ---------------------------------------------------------------------------
+  # 6) Sign/attest + build binaries + draft release (x86 runner)
+  # ---------------------------------------------------------------------------
   sign-and-release:
     name: Sign, attest, and release
     needs: [create-manifest, build-amd]
     if: ${{ needs.create-manifest.result == 'success' && needs.build-amd.result == 'success' }}
-    runs-on: ${{ needs.create-runner-x86.outputs.label }}
+    runs-on: [self-hosted, linux, x64] # NOTE: ensure label exists on runner
     timeout-minutes: 120
     env:
       DOCKERHUB_IMAGE: docker.io/marcschaeferger/${{ github.event.repository.name }}
-      GHCR_IMAGE: ghcr.io/marcschaeferger/${{ github.event.repository.name }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
       TAG: ${{ needs.build-amd.outputs.tag }}
       IS_RC: ${{ needs.build-amd.outputs.is_rc }}
     steps:
@@ -541,12 +443,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Capture created timestamp
+        run: echo "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+        shell: bash
+
       - name: Install Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
           go-version-file: go.mod
 
       - name: Log in to Docker Hub
+        if: ${{ secrets.DOCKER_HUB_USERNAME != '' && secrets.DOCKER_HUB_ACCESS_TOKEN != '' }}
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: docker.io
@@ -567,21 +474,29 @@ jobs:
           echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
           echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
 
-      - name: Set up Docker Buildx (for imagetools inspect)
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
       - name: Resolve multi-arch digest refs (by TAG)
         shell: bash
         run: |
           set -euo pipefail
           GHCR_DIGEST="$(docker buildx imagetools inspect "${GHCR_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
-          DH_DIGEST="$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
           echo "GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}" >> $GITHUB_ENV
-          echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> $GITHUB_ENV
-          echo "GHCR_DIGEST=${GHCR_DIGEST}" >> $GITHUB_ENV
-          echo "DH_DIGEST=${DH_DIGEST}" >> $GITHUB_ENV
+          echo "Resolved GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}"
+          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
+            DH_DIGEST="$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
+            echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> $GITHUB_ENV
+            echo "Resolved DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}"
+          fi
 
-      - name: Attest build provenance (GHCR)
+      - name: Extract digests for attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "GHCR_DIGEST=${GHCR_REF#*@}" >> $GITHUB_ENV
+          if [ -n "${DH_REF:-}" ]; then
+            echo "DH_DIGEST=${DH_REF#*@}" >> $GITHUB_ENV
+          fi
+
+      - name: Attest build provenance (GHCR) (digest)
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
@@ -591,6 +506,7 @@ jobs:
 
       - name: Attest build provenance (Docker Hub)
         continue-on-error: true
+        if: ${{ env.DH_DIGEST != '' }}
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
         with:
           subject-name: index.docker.io/marcschaeferger/${{ github.event.repository.name }}
@@ -635,6 +551,7 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${GHCR_REF}"
+          sleep 20
 
       - name: Create SBOM attestation (GHCR, key)
         env:
@@ -650,34 +567,6 @@ jobs:
             --predicate sbom.spdx.json \
             "${GHCR_REF}"
 
-      - name: Sign Docker Hub digest (key, recursive)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          cosign sign --key env://COSIGN_PRIVATE_KEY --recursive "${DH_REF}"
-
-      - name: Create SBOM attestation (Docker Hub, key)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD:    ${{ secrets.COSIGN_PASSWORD }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          cosign attest \
-            --key env://COSIGN_PRIVATE_KEY \
-            --type spdxjson \
-            --predicate sbom.spdx.json \
-            "${DH_REF}"
-
       - name: Keyless sign & verify GHCR digest (OIDC)
         env:
           COSIGN_YES: "true"
@@ -692,22 +581,6 @@ jobs:
             --certificate-identity "https://github.com/${WORKFLOW_REF}" \
             "${GHCR_REF}" -o text
 
-      - name: Keyless sign & verify Docker Hub digest (OIDC)
-        continue-on-error: true
-        env:
-          COSIGN_YES: "true"
-          WORKFLOW_REF: ${{ github.workflow_ref }}
-          ISSUER: https://token.actions.githubusercontent.com
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          cosign sign --rekor-url https://rekor.sigstore.dev --recursive "${DH_REF}"
-          cosign verify \
-            --certificate-oidc-issuer "${ISSUER}" \
-            --certificate-identity "https://github.com/${WORKFLOW_REF}" \
-            "${DH_REF}" -o text
-
       - name: Verify signature (public key) GHCR digest + tag
         env:
           COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
@@ -717,22 +590,11 @@ jobs:
           cosign verify --key env://COSIGN_PUBLIC_KEY "${GHCR_REF}" -o text
           cosign verify --key env://COSIGN_PUBLIC_KEY "${GHCR_IMAGE}:${TAG}" -o text
 
-      - name: Verify signature (public key) Docker Hub digest + tag
-        continue-on-error: true
-        env:
-          COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-          COSIGN_DOCKER_MEDIA_TYPES: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          cosign verify --key env://COSIGN_PUBLIC_KEY "${DH_REF}" -o text
-          cosign verify --key env://COSIGN_PUBLIC_KEY "${DOCKERHUB_IMAGE}:${TAG}" -o text
-
       - name: Verify SBOM attestation (GHCR)
         env:
           COSIGN_PUBLIC_KEY: ${{ secrets.COSIGN_PUBLIC_KEY }}
-        shell: bash
         run: cosign verify-attestation --key env://COSIGN_PUBLIC_KEY --type spdxjson "${GHCR_REF}" -o text
+        shell: bash
 
       - name: Build binaries
         env:
@@ -756,37 +618,43 @@ jobs:
           body: |
             ## Container Images
             - GHCR: `${{ env.GHCR_REF }}`
-            - Docker Hub: `${{ env.DH_REF }}`
+            - Docker Hub: `${{ env.DH_REF || 'N/A' }}`
             **Tag:** `${{ env.TAG }}`
 
   # ---------------------------------------------------------------------------
-  # 4) Destroy runners (always) to avoid cost leaks
+  # 7) Stop AWS EC2 runner instances
   # ---------------------------------------------------------------------------
-  destroy-runners:
-    name: Destroy Hetzner runners
+  post-run:
+    name: Stop AWS EC2 runners
+    needs: [pre-run, prepare, build-amd, build-arm, create-manifest, sign-and-release]
+    if: >-
+      ${{
+        always() &&
+        (needs.pre-run.result == 'success'  &&
+        (needs.build-amd.result == 'success' || needs.build-amd.result == 'failure' || needs.build-amd.result == 'cancelled') || 
+         needs.build-amd.result != 'skipped') &&
+        (needs.build-arm.result == 'success' || needs.build-arm.result == 'failure' || needs.build-arm.result == 'cancelled') ||
+        needs.build-arm.result != 'skipped') &&
+        (needs.create-manifest.result == 'success' || needs.create-manifest.result == 'failure' || needs.create-manifest.result == 'cancelled') ||
+        needs.create-manifest.result != 'skipped') &&
+        (needs.sign-and-release.result == 'success' || needs.sign-and-release.result == 'failure' || needs.sign-and-release.result == 'cancelled') ||
+        needs.sign-and-release.result != 'skipped')
+      }}
     runs-on: ubuntu-latest
-    needs:
-      - create-runner-x86
-      - create-runner-arm
-      - prepare
-      - build-amd
-      - build-arm
-      - create-manifest
-      - sign-and-release
-    if: ${{ always() }}
+    permissions: write-all
     steps:
-      - name: Destroy x86 runner
-        uses: Cyclenerd/hcloud-github-runner@v1
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
         with:
-          mode: destroy
-          github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
-          server_id: ${{ needs.create-runner-x86.outputs.server_id }}
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+          role-duration-seconds: 3600
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Destroy ARM runner
-        uses: Cyclenerd/hcloud-github-runner@v1
-        with:
-          mode: destroy
-          github_token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-          hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
-          server_id: ${{ needs.create-runner-arm.outputs.server_id }}
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Stop EC2 instances
+        run: |
+          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_AMD_RUNNER }}
+          aws ec2 stop-instances --instance-ids ${{ secrets.EC2_INSTANCE_ID_ARM_RUNNER }}
+          echo "EC2 instances stopped"
