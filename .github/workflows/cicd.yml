@@ -471,26 +471,54 @@ jobs:
           echo "GHCR_IMAGE=${GHCR_IMAGE,,}" >> "$GITHUB_ENV"
           echo "DOCKERHUB_IMAGE=${DOCKERHUB_IMAGE,,}" >> "$GITHUB_ENV"
 
+      - name: Ensure jq is installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v jq >/dev/null 2>&1; then
+            exit 0
+          fi
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx (needed for imagetools)
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
       - name: Resolve multi-arch digest refs (by TAG)
         shell: bash
         run: |
           set -euo pipefail
-          GHCR_DIGEST="$(docker buildx imagetools inspect "${GHCR_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
-          echo "GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}" >> $GITHUB_ENV
-          echo "Resolved GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}"
-          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
-            DH_DIGEST="$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${TAG}" --format '{{.Manifest.Digest}}')"
-            echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> $GITHUB_ENV
-            echo "Resolved DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}"
-          fi
 
-      - name: Extract digests for attestation
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "GHCR_DIGEST=${GHCR_REF#*@}" >> $GITHUB_ENV
-          if [ -n "${DH_REF:-}" ]; then
-            echo "DH_DIGEST=${DH_REF#*@}" >> $GITHUB_ENV
+          get_digest() {
+            local ref="$1"
+            local d=""
+            # Primary: buildx format output
+            d="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+
+            # Fallback: parse from plain text if format fails
+            if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              d="$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)"
+            fi
+
+            if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "ERROR: Could not extract digest for $ref" >&2
+              docker buildx imagetools inspect "$ref" || true
+              exit 1
+            fi
+
+            echo "$d"
+          }
+
+          GHCR_DIGEST="$(get_digest "${GHCR_IMAGE}:${TAG}")"
+          echo "GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}" >> "$GITHUB_ENV"
+          echo "GHCR_DIGEST=${GHCR_DIGEST}" >> "$GITHUB_ENV"
+          echo "Resolved GHCR_REF=${GHCR_IMAGE}@${GHCR_DIGEST}"
+
+          if [ -n "${{ secrets.DOCKER_HUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}" ]; then
+            DH_DIGEST="$(get_digest "${DOCKERHUB_IMAGE}:${TAG}")"
+            echo "DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}" >> "$GITHUB_ENV"
+            echo "DH_DIGEST=${DH_DIGEST}" >> "$GITHUB_ENV"
+            echo "Resolved DH_REF=${DOCKERHUB_IMAGE}@${DH_DIGEST}"
           fi
 
       - name: Attest build provenance (GHCR) (digest)
