@@ -80,6 +80,24 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 
 	logger.Debug(fmtReceivedMsg, msg)
 
+	// Release the device and TUN created below if registration aborts
+	// before the tunnel is marked connected; otherwise they leak and the
+	// next registration overwrites them without closing.
+	tunnelReady := false
+	defer func() {
+		if tunnelReady {
+			return
+		}
+		if n.dev != nil {
+			n.dev.Close()
+		} else if n.tun != nil {
+			_ = n.tun.Close()
+		}
+		n.dev = nil
+		n.tun = nil
+		n.tnet = nil
+	}()
+
 	if n.config.UseNativeMainInterface {
 		mainIfName := n.config.NativeMainInterfaceName
 		if runtime.GOOS == "darwin" {
@@ -112,6 +130,7 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		if err != nil {
 			logger.Error("Failed to create TUN device: %v", err)
 			regResult = "failure"
+			return
 		}
 	}
 
@@ -250,6 +269,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	n.currentPM.Store(n.pm)
 
 	n.connected = true
+	tunnelReady = true
 
 	if len(n.wgData.Targets.TCP) > 0 {
 		n.updateTargets(n.pm, "add", n.wgData.TunnelIP, "tcp", TargetData{Targets: n.wgData.Targets.TCP})
