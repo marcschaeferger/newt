@@ -3,7 +3,6 @@ package newt
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/fosrl/newt/logger"
 	"github.com/fosrl/newt/websocket"
@@ -36,32 +35,22 @@ func (n *Newt) handleSync(msg websocket.WSMessage) {
 	// Build sets of desired targets (port -> target string)
 	desiredTCP := make(map[int]string)
 	for _, t := range syncData.Targets.TCP {
-		parts := strings.Split(t, ":")
-		if len(parts) != 3 {
-			logger.Warn("Invalid TCP target format: %s", t)
+		port, target, err := parseTargetString(t)
+		if err != nil {
+			logger.Warn("Invalid TCP target format: %s (%v)", t, err)
 			continue
 		}
-		port := 0
-		if _, err := fmt.Sscanf(parts[0], "%d", &port); err != nil {
-			logger.Warn("Invalid port in TCP target: %s", parts[0])
-			continue
-		}
-		desiredTCP[port] = parts[1] + ":" + parts[2]
+		desiredTCP[port] = target
 	}
 
 	desiredUDP := make(map[int]string)
 	for _, t := range syncData.Targets.UDP {
-		parts := strings.Split(t, ":")
-		if len(parts) != 3 {
-			logger.Warn("Invalid UDP target format: %s", t)
+		port, target, err := parseTargetString(t)
+		if err != nil {
+			logger.Warn("Invalid UDP target format: %s (%v)", t, err)
 			continue
 		}
-		port := 0
-		if _, err := fmt.Sscanf(parts[0], "%d", &port); err != nil {
-			logger.Warn("Invalid port in UDP target: %s", parts[0])
-			continue
-		}
-		desiredUDP[port] = parts[1] + ":" + parts[2]
+		desiredUDP[port] = target
 	}
 
 	// Get current targets from proxy manager
