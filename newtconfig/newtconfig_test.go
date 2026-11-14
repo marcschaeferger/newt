@@ -224,3 +224,28 @@ func TestResolveConfigFilePath_Precedence(t *testing.T) {
 		t.Errorf("expected env path, got %q", got)
 	}
 }
+
+func TestLoadNewtConfig_LegacyPKCS12ViaTLSClientCertEnv(t *testing.T) {
+	clearNewtEnv(t)
+	for _, k := range []string{"TLS_CLIENT_KEY", "TLS_CLIENT_CAS", "TLS_CLIENT_CERT_PKCS12"} {
+		t.Setenv(k, "")
+	}
+
+	tmpDir := t.TempDir()
+	p12Path := filepath.Join(tmpDir, "client.p12")
+	if err := os.WriteFile(p12Path, []byte("test"), 0o600); err != nil {
+		t.Fatalf("failed to write PKCS12 file: %v", err)
+	}
+	t.Setenv("TLS_CLIENT_CERT", p12Path)
+
+	cfg, err := Load(Options{Args: []string{"--config-file", filepath.Join(tmpDir, "missing.json")}})
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.TLSPrivateKey != p12Path {
+		t.Errorf("expected PKCS12 path %q, got %q", p12Path, cfg.TLSPrivateKey)
+	}
+	if cfg.TLSClientCert != "" {
+		t.Errorf("expected separate client cert to be cleared, got %q", cfg.TLSClientCert)
+	}
+}
