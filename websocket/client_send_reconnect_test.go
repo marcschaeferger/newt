@@ -14,19 +14,32 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+var setupClientTestOnce sync.Once
+
+// setupClientTest initialises telemetry and the global logger exactly once for
+// the client tests. The logger's level is an unsynchronised global and its lazy
+// initialisation is not safe for concurrent first use, so it must not be
+// written again while goroutines left over from an earlier test still log.
+// Raising the level also keeps per-send debug lines out of the test output.
+func setupClientTest(t *testing.T) {
+	t.Helper()
+	var err error
+	setupClientTestOnce.Do(func() {
+		_, err = telemetry.Init(context.Background(), telemetry.Config{ServiceName: "test"})
+		logger.GetLogger().SetLevel(logger.ERROR)
+	})
+	if err != nil {
+		t.Fatalf("telemetry.Init: %v", err)
+	}
+}
+
 // TestSendMessageDuringReconnectDoesNotPanic drives a client against a server
 // that drops every websocket connection shortly after accepting it, so the
 // client keeps reconnecting while another goroutine sends messages. A send
 // that races the reconnect must return an error rather than dereference a
 // nil connection.
 func TestSendMessageDuringReconnectDoesNotPanic(t *testing.T) {
-	if _, err := telemetry.Init(context.Background(), telemetry.Config{ServiceName: "test"}); err != nil {
-		t.Fatalf("telemetry.Init: %v", err)
-	}
-	// Initialise the global logger before any goroutine uses it; its lazy
-	// initialisation is not safe for concurrent first use. Raising the level
-	// also keeps the per-send debug line from flooding the test output.
-	logger.GetLogger().SetLevel(logger.ERROR)
+	setupClientTest(t)
 
 	upgrader := websocket.Upgrader{}
 	mux := http.NewServeMux()
