@@ -34,6 +34,10 @@ type HTTPRequestLogger struct {
 	sendFn    SendFunc
 	stopCh    chan struct{}
 	flushDone chan struct{}
+	// retryAt suppresses size-triggered inline flushes after a failed send
+	// until the next flush interval, so a failing server does not cause the
+	// whole buffer to be compressed and resent on every logged request.
+	retryAt time.Time
 }
 
 // NewHTTPRequestLogger creates a new HTTPRequestLogger and starts its background flush loop.
@@ -57,7 +61,8 @@ func (rl *HTTPRequestLogger) SetSendFunc(fn SendFunc) {
 }
 
 // LogRequest adds an HTTP request log entry to the buffer. If the buffer
-// reaches maxBufferedSessions entries a flush is triggered immediately.
+// reaches maxBufferedSessions entries a flush is triggered immediately,
+// unless a recent send failed, in which case the background loop retries.
 func (rl *HTTPRequestLogger) LogRequest(log HTTPRequestLog) {
 	if log.RequestID == "" {
 		log.RequestID = generateSessionID()
@@ -65,7 +70,11 @@ func (rl *HTTPRequestLogger) LogRequest(log HTTPRequestLog) {
 
 	rl.mu.Lock()
 	rl.pending = append(rl.pending, log)
-	shouldFlush := len(rl.pending) >= maxBufferedSessions
+	// Keep the buffer capped while inline flushes are backed off
+	if len(rl.pending) > maxBufferedSessions*5 {
+		rl.pending = rl.pending[len(rl.pending)-maxBufferedSessions*5:]
+	}
+	shouldFlush := len(rl.pending) >= maxBufferedSessions && !time.Now().Before(rl.retryAt)
 	rl.mu.Unlock()
 
 	if shouldFlush {
@@ -123,12 +132,18 @@ func (rl *HTTPRequestLogger) flush() {
 		// Cap re-queued data to prevent unbounded growth if server is unreachable
 		if len(rl.pending) > maxBufferedSessions*5 {
 			dropped := len(rl.pending) - maxBufferedSessions*5
-			rl.pending = rl.pending[:maxBufferedSessions*5]
+			rl.pending = rl.pending[dropped:]
 			logger.Warn("HTTP request logger: buffer overflow, dropped %d oldest requests", dropped)
 		}
+		// Back off inline flushes until the next tick
+		rl.retryAt = time.Now().Add(flushInterval)
 		rl.mu.Unlock()
 		return
 	}
+
+	rl.mu.Lock()
+	rl.retryAt = time.Time{}
+	rl.mu.Unlock()
 
 	logger.Info("HTTP request logger: sent %d requests to server", len(batch))
 }
