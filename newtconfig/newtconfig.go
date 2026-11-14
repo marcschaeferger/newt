@@ -501,6 +501,10 @@ func Load(opts Options) (newtpkg.Config, error) {
 	if cfg.TLSPrivateKey == "" && cfg.TLSClientKey == "" && len(cfg.TLSClientCAs) == 0 && cfg.TLSClientCert != "" {
 		cfg.TLSPrivateKey = cfg.TLSClientCert
 		sources["tls-client-cert"] = sources["tls-client-cert-file"]
+		// The value is now the PKCS12 path; clear the separate-file setting so
+		// validateTLSConfig does not see both modes configured at once.
+		cfg.TLSClientCert = ""
+		delete(sources, "tls-client-cert-file")
 	}
 
 	metricsEnabledEnv := os.Getenv("NEWT_METRICS_PROMETHEUS_ENABLED")
