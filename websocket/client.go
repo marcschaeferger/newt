@@ -665,7 +665,7 @@ func (c *Client) establishConnection() error {
 	})
 
 	// Start the ping monitor
-	go c.pingMonitor(connClosed)
+	go c.pingMonitor(conn, connClosed)
 	// Start the read pump with disconnect detection
 	go c.readPumpWithDisconnectDetection(conn, sessionStart, connClosed)
 
@@ -745,8 +745,9 @@ func (c *Client) setupPKCS12TLS() (*tls.Config, error) {
 	return loadClientCertificate(c.tlsConfig.PKCS12File)
 }
 
-// pingMonitor sends pings at a short interval and triggers reconnect on failure
-func (c *Client) sendPing() {
+// sendPing pings conn. It only ever touches its own conn, so a stale ping
+// monitor cannot tear down a connection that has since replaced it.
+func (c *Client) sendPing(conn *websocket.Conn) {
 	// Skip ping if a message is currently being processed
 	c.processingMux.RLock()
 	isProcessing := c.processingMessage
@@ -767,13 +768,9 @@ func (c *Client) sendPing() {
 	}
 
 	c.writeMux.Lock()
-	if c.conn == nil {
-		c.writeMux.Unlock()
-		return
-	}
-	err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	err := conn.SetWriteDeadline(time.Now().Add(writeDeadline))
 	if err == nil {
-		err = c.conn.WriteJSON(pingMsg)
+		err = conn.WriteJSON(pingMsg)
 	}
 	if err == nil {
 		telemetry.IncWSMessage(c.metricsContext(), "out", "ping")
@@ -781,7 +778,7 @@ func (c *Client) sendPing() {
 		// which refreshes the read deadline. This is what lets us notice a
 		// half-open connection where writes still succeed (buffered) but the
 		// peer is gone.
-		_ = c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline))
+		_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeDeadline))
 	}
 	c.writeMux.Unlock()
 
@@ -795,21 +792,19 @@ func (c *Client) sendPing() {
 			logger.Error("Ping failed: %v", err)
 			telemetry.IncWSKeepaliveFailure(c.metricsContext(), "ping_write")
 			telemetry.IncWSReconnect(c.metricsContext(), "ping_write")
-			// Close the connection and let the read pump trigger a single
+			// Close this connection and let its read pump trigger a single
 			// reconnect (avoids racing two reconnects from here and the pump).
-			c.writeMux.Lock()
-			if c.conn != nil {
-				_ = c.conn.Close()
-			}
-			c.writeMux.Unlock()
+			// The pump only reconnects if conn is still the published one.
+			_ = conn.Close()
 			return
 		}
 	}
 }
 
-func (c *Client) pingMonitor(connClosed <-chan struct{}) {
+// pingMonitor sends pings on conn at a short interval until conn ends.
+func (c *Client) pingMonitor(conn *websocket.Conn, connClosed <-chan struct{}) {
 	// Send an immediate ping as soon as we connect
-	c.sendPing()
+	c.sendPing(conn)
 
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
@@ -823,7 +818,7 @@ func (c *Client) pingMonitor(connClosed <-chan struct{}) {
 			// for the next connection by establishConnection.
 			return
 		case <-ticker.C:
-			c.sendPing()
+			c.sendPing(conn)
 		}
 	}
 }
