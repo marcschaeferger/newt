@@ -44,6 +44,8 @@ type NewtErrorData struct {
 func (n *Newt) registerHandlers(ctx context.Context) {
 	//TODO: MOVE MORE OF THESE HANDLERS TO STANDALONE FUNCTIONS IN THE DATA.GO AND CONNECT.GO FILES
 
+	context.AfterFunc(ctx, n.stopChainSupervisor)
+
 	n.client.RegisterHandler("newt/wg/connect", func(msg websocket.WSMessage) {
 		n.handleConnect(ctx, msg)
 	})
@@ -80,17 +82,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 
 		n.connected = false
 
-		if n.stopFunc != nil {
-			n.stopFunc()
-			n.stopFunc = nil
-		}
-
-		pingChainId := generateChainId()
-		n.pendingPingChainId = pingChainId
-		n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+		n.chain.mu.Lock()
+		n.startPingRequestChainLocked(map[string]interface{}{
 			"noCloud": n.config.NoCloud,
-			"chainId": pingChainId,
-		}, 3*time.Second)
+		})
+		n.chain.mu.Unlock()
 
 		logger.Info("Tunnel destroyed, ready for reconnection")
 	})
@@ -121,10 +117,14 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		n.closeWgTunnel()
 		n.closeClients()
 
+		n.chain.mu.Lock()
 		if n.stopFunc != nil {
 			n.stopFunc()
 			n.stopFunc = nil
 		}
+		// The server ended this site's tunnel on purpose: do not retry.
+		n.disarmChainRetryLocked()
+		n.chain.mu.Unlock()
 
 		n.connected = false
 
@@ -147,9 +147,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 		exitNodes := exitNodeData.ExitNodes
 
+		n.chain.mu.Lock()
 		if exitNodeData.ChainId != "" {
 			if exitNodeData.ChainId != n.pendingPingChainId {
 				logger.Debug("Discarding duplicate/stale newt/ping/exitNodes (chainId=%s, expected=%s)", exitNodeData.ChainId, n.pendingPingChainId)
+				n.chain.mu.Unlock()
 				return
 			}
 			n.pendingPingChainId = ""
@@ -161,22 +163,31 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		}
 
 		if len(exitNodes) == 0 {
-			logger.Info("No exit nodes provided")
+			delay := n.nextChainBackoffLocked()
+			logger.Info("No exit nodes provided, requesting again in %v", delay.Round(time.Millisecond))
+			n.scheduleChainRetryLocked(delay)
+			n.chain.mu.Unlock()
 			return
 		}
+		n.chain.mu.Unlock()
 
 		pingResults := exitnode.PingExitNodes(exitNodes, n.config.PreferEndpoint, n.connected)
 
-		chainId := generateChainId()
-		n.pendingRegisterChainId = chainId
-		n.stopFunc = n.client.SendMessageInterval(topicWGRegister, map[string]interface{}{
+		n.chain.mu.Lock()
+		defer n.chain.mu.Unlock()
+		if n.stopFunc != nil {
+			// A newer ping-request chain started while the exit nodes were
+			// being pinged; its own reply will drive the registration.
+			logger.Debug("Discarding exit node ping results superseded by a newer chain")
+			return
+		}
+		n.startRegisterChainLocked(map[string]interface{}{
 			"publicKey":    n.publicKey.String(),
 			"pingResults":  pingResults,
 			"newtVersion":  n.config.Version,
 			"agent":        n.config.Agent,
 			"agentVersion": n.config.AgentVersion,
-			"chainId":      chainId,
-		}, 2*time.Second)
+		})
 
 		logger.Debug("Sent exit node ping results to cloud for selection: pingResults=%+v", pingResults)
 	})
@@ -869,18 +880,18 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 		logger.Debug("Public key: %s", n.publicKey)
 		logger.Info("Websocket connected")
 
-		if !n.connected {
-			if n.stopFunc != nil {
-				n.stopFunc()
-			}
-			pingChainId := generateChainId()
-			n.pendingPingChainId = pingChainId
-			n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
+		// A data-plane recovery that is still waiting for a tunnel restarts its
+		// chain too, otherwise a reconnect would leave the latched site alone.
+		if !n.connected || n.dataPlaneLost.Load() {
+			n.chain.mu.Lock()
+			n.startPingRequestChainLocked(map[string]interface{}{
 				"noCloud": n.config.NoCloud,
-				"chainId": pingChainId,
-			}, 3*time.Second)
+			})
+			n.chain.mu.Unlock()
 			logger.Debug("Requesting exit nodes from server")
+		}
 
+		if !n.connected {
 			if n.client.GetServerVersion() != "" {
 				n.clientsOnConnect()
 			} else {

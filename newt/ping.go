@@ -278,11 +278,10 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 						if tunnelID != "" {
 							telemetry.IncReconnect(context.Background(), tunnelID, "client", telemetry.ReasonTimeout)
 						}
-						pingChainId := generateChainId()
-						n.pendingPingChainId = pingChainId
-						n.stopFunc = n.client.SendMessageInterval("newt/ping/request", map[string]interface{}{
-							"chainId": pingChainId,
-						}, 3*time.Second)
+						n.dataPlaneLost.Store(true)
+						n.chain.mu.Lock()
+						n.startPingRequestChainLocked(map[string]interface{}{})
+						n.chain.mu.Unlock()
 						bcChainId := generateChainId()
 						// This compatibility message has no wg/connect response and must
 						// not supersede the pending real registration chain.
@@ -316,6 +315,8 @@ func (n *Newt) startPingCheck(fn pingFunc, serverIP, tunnelID string) chan struc
 
 					if connectionLost {
 						connectionLost = false
+						// The old tunnel works again: drop the recovery chain.
+						n.dataPlaneRecovered()
 						logger.Info("Connection to server restored after %d failures!", consecutiveFailures)
 						if n.config.HealthFile != "" {
 							if err := os.WriteFile(n.config.HealthFile, []byte("ok"), 0644); err != nil {

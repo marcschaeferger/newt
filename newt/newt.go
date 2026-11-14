@@ -55,6 +55,14 @@ type Newt struct {
 	pendingRegisterChainId string
 	pendingPingChainId     string
 
+	// chain guards stopFunc and the pending chain IDs and restarts the
+	// ping-request/register chain when it ends without a tunnel.
+	chain       chainSupervisor
+	chainTiming chainTiming
+	// dataPlaneLost is set while data-plane recovery is waiting for a new
+	// tunnel, so a websocket reconnect requests exit nodes again.
+	dataPlaneLost atomic.Bool
+
 	// Browser gateway
 	browserGateway     *browsergateway.Gateway
 	browserGatewayStop func()
@@ -293,6 +301,7 @@ func (n *Newt) Start(ctx context.Context) {
 // Close performs an emergency shutdown: closes the tunnel, clients, health
 // monitor, and websocket connection. Typically used before re-exec.
 func (n *Newt) Close() {
+	n.stopChainSupervisor()
 	n.closeWgTunnel()
 	n.closeClients()
 	n.closeSSHSessionLog()

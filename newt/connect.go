@@ -45,9 +45,11 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 	if jsonBytes, err := json.Marshal(msg.Data); err == nil {
 		_ = json.Unmarshal(jsonBytes, &chainData)
 	}
+	n.chain.mu.Lock()
 	if chainData.ChainId != "" {
 		if chainData.ChainId != n.pendingRegisterChainId {
 			logger.Debug("Discarding duplicate/stale newt/wg/connect (chainId=%s, expected=%s)", chainData.ChainId, n.pendingRegisterChainId)
+			n.chain.mu.Unlock()
 			return
 		}
 		n.pendingRegisterChainId = ""
@@ -57,6 +59,10 @@ func (n *Newt) handleConnect(ctx context.Context, msg websocket.WSMessage) {
 		n.stopFunc()
 		n.stopFunc = nil
 	}
+	// A late exit-node reply to a superseded ping request must not start a
+	// second registration once this one is accepted.
+	n.pendingPingChainId = ""
+	n.chain.mu.Unlock()
 
 	if n.connected {
 		n.closeWgTunnel()
@@ -250,6 +256,7 @@ persistent_keepalive_interval=5`, util.FixKey(n.privateKey.String()), util.FixKe
 	n.currentPM.Store(n.pm)
 
 	n.connected = true
+	n.chainSucceeded()
 
 	if len(n.wgData.Targets.TCP) > 0 {
 		n.updateTargets(n.pm, "add", n.wgData.TunnelIP, "tcp", TargetData{Targets: n.wgData.Targets.TCP})
