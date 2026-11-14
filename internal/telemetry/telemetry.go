@@ -226,7 +226,7 @@ func buildMeterProvider(res *resource.Resource, readers []metric.Reader) *metric
 		metric.Stream{AttributeFilter: func(kv attribute.KeyValue) bool {
 			k := string(kv.Key)
 			switch k {
-			case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "version", "commit", "site_id", "region":
+			case "tunnel_id", "transport", "direction", "protocol", "result", "reason", "initiator", "error_type", "msg_type", "phase", "event", "version", "commit", "site_id", "region":
 				return true
 			default:
 				return false
