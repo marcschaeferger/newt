@@ -171,6 +171,16 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// closeWrite half-closes conn so the peer sees EOF while the opposite
+// direction keeps flowing. Connections without half-close support are closed.
+func closeWrite(conn net.Conn) {
+	if hc, ok := conn.(interface{ CloseWrite() error }); ok {
+		_ = hc.CloseWrite()
+		return
+	}
+	_ = conn.Close()
+}
+
 func classifyProxyError(err error) string {
 	if err == nil {
 		return ""
@@ -675,18 +685,28 @@ func (pm *ProxyManager) handleTCPProxy(listener *managedListener, targetAddr str
 			go func(ent *tunnelEntry) {
 				defer wg.Done()
 				cw := &countingWriter{ctx: context.Background(), w: target, set: ent.attrInTCP, pm: pm, ent: ent, out: false, proto: "tcp"}
-				_, _ = io.Copy(cw, accepted)
-				_ = target.Close()
+				if _, err := io.Copy(cw, accepted); err != nil {
+					_ = accepted.Close()
+					_ = target.Close()
+					return
+				}
+				closeWrite(target)
 			}(entry)
 
 			go func(ent *tunnelEntry) {
 				defer wg.Done()
 				cw := &countingWriter{ctx: context.Background(), w: accepted, set: ent.attrOutTCP, pm: pm, ent: ent, out: true, proto: "tcp"}
-				_, _ = io.Copy(cw, target)
-				_ = accepted.Close()
+				if _, err := io.Copy(cw, target); err != nil {
+					_ = accepted.Close()
+					_ = target.Close()
+					return
+				}
+				closeWrite(accepted)
 			}(entry)
 
 			wg.Wait()
+			_ = accepted.Close()
+			_ = target.Close()
 			if tunnelID != "" {
 				state.Global().DecSessions(tunnelID)
 				if e := pm.getEntry(tunnelID); e != nil {
