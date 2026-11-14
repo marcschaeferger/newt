@@ -238,11 +238,11 @@ func (c *Client) Close() error {
 	telemetry.SetWSConnectionState(false)
 
 	// Close the WebSocket connection gracefully
+	c.writeMux.Lock()
+	defer c.writeMux.Unlock()
 	if c.conn != nil {
 		// Send close message
-		c.writeMux.Lock()
 		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		c.writeMux.Unlock()
 
 		// Close the connection
 		return c.conn.Close()
@@ -253,10 +253,6 @@ func (c *Client) Close() error {
 
 // SendMessage sends a message through the WebSocket connection
 func (c *Client) SendMessage(messageType string, data interface{}) error {
-	if c.conn == nil {
-		return fmt.Errorf("not connected")
-	}
-
 	msg := WSMessage{
 		Type: messageType,
 		Data: data,
@@ -266,6 +262,9 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline)); err != nil {
 		return err
 	}
@@ -278,10 +277,6 @@ func (c *Client) SendMessage(messageType string, data interface{}) error {
 
 // SendMessage sends a message through the WebSocket connection
 func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
-	if c.conn == nil {
-		return fmt.Errorf("not connected")
-	}
-
 	msg := WSMessage{
 		Type: messageType,
 		Data: data,
@@ -289,6 +284,9 @@ func (c *Client) SendMessageNoLog(messageType string, data interface{}) error {
 
 	c.writeMux.Lock()
 	defer c.writeMux.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("not connected")
+	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(writeDeadline)); err != nil {
 		return err
 	}
@@ -641,7 +639,9 @@ func (c *Client) establishConnection() error {
 
 	telemetry.IncConnAttempt(ctx, "websocket", "success")
 	telemetry.ObserveWSConnectLatency(ctx, lat, "success", "")
+	c.writeMux.Lock()
 	c.conn = conn
+	c.writeMux.Unlock()
 	c.setConnected(true)
 	telemetry.SetWSConnectionState(true)
 	c.setMetricsContext(ctx)
@@ -657,9 +657,9 @@ func (c *Client) establishConnection() error {
 	// half-open connection (e.g. a cloud load balancer keeping the socket open
 	// after the backend API server died/restarted) instead of blocking on
 	// ReadMessage forever — which previously required restarting newt by hand.
-	_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
-	c.conn.SetPongHandler(func(appData string) error {
-		_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
+	_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
+	conn.SetPongHandler(func(appData string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
 		telemetry.IncWSMessage(c.metricsContext(), "in", "pong")
 		return nil
 	})
@@ -667,7 +667,7 @@ func (c *Client) establishConnection() error {
 	// Start the ping monitor
 	go c.pingMonitor(connClosed)
 	// Start the read pump with disconnect detection
-	go c.readPumpWithDisconnectDetection(sessionStart, connClosed)
+	go c.readPumpWithDisconnectDetection(conn, sessionStart, connClosed)
 
 	if c.onConnect != nil {
 		err := c.saveConfig()
@@ -747,10 +747,6 @@ func (c *Client) setupPKCS12TLS() (*tls.Config, error) {
 
 // pingMonitor sends pings at a short interval and triggers reconnect on failure
 func (c *Client) sendPing() {
-	if c.conn == nil {
-		return
-	}
-
 	// Skip ping if a message is currently being processed
 	c.processingMux.RLock()
 	isProcessing := c.processingMessage
@@ -832,8 +828,10 @@ func (c *Client) pingMonitor(connClosed <-chan struct{}) {
 	}
 }
 
-// readPumpWithDisconnectDetection reads messages and triggers reconnect on error
-func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed chan struct{}) {
+// readPumpWithDisconnectDetection reads messages from conn and triggers
+// reconnect on error. It only ever touches its own conn, so a stale pump
+// cannot tear down a connection that has since replaced it.
+func (c *Client) readPumpWithDisconnectDetection(conn *websocket.Conn, started time.Time, connClosed chan struct{}) {
 	ctx := c.metricsContext()
 	disconnectReason := "shutdown"
 	disconnectResult := "success"
@@ -841,9 +839,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 	defer func() {
 		// Signal the ping monitor for this connection to stop.
 		close(connClosed)
-		if c.conn != nil {
-			c.conn.Close()
-		}
+		_ = conn.Close()
 		if !started.IsZero() {
 			telemetry.ObserveWSSessionDuration(ctx, time.Since(started).Seconds(), disconnectResult)
 		}
@@ -855,7 +851,7 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 			return
 		default:
 			telemetry.IncWSReconnect(ctx, disconnectReason)
-			c.reconnect()
+			c.reconnect(conn)
 		}
 	}()
 
@@ -866,12 +862,12 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 			disconnectResult = "success"
 			return
 		default:
-			msgType, p, err := c.conn.ReadMessage()
+			msgType, p, err := conn.ReadMessage()
 			if err == nil {
 				// Any inbound traffic means the peer is alive — extend the
 				// read deadline (also covers servers that answer the app-level
 				// "newt/ping" with a message rather than a protocol pong).
-				_ = c.conn.SetReadDeadline(time.Now().Add(c.pongWait))
+				_ = conn.SetReadDeadline(time.Now().Add(c.pongWait))
 				if msgType == websocket.BinaryMessage {
 					telemetry.IncWSMessage(c.metricsContext(), "in", "binary")
 				} else {
@@ -948,15 +944,21 @@ func (c *Client) readPumpWithDisconnectDetection(started time.Time, connClosed c
 	}
 }
 
-func (c *Client) reconnect() {
+// reconnect tears down old and starts a new connection attempt, but only if
+// old is still the published connection. If a newer connection has already
+// replaced it, that connection is left alone and no extra attempt is started.
+func (c *Client) reconnect(old *websocket.Conn) {
+	c.writeMux.Lock()
+	if c.conn != old {
+		c.writeMux.Unlock()
+		return
+	}
+	c.conn = nil
+	c.writeMux.Unlock()
+	_ = old.Close()
+
 	c.setConnected(false)
 	telemetry.SetWSConnectionState(false)
-	c.writeMux.Lock()
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-	c.writeMux.Unlock()
 
 	// Only reconnect if we're not shutting down
 	select {
