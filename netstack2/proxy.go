@@ -409,7 +409,20 @@ func (p *ProxyHandler) releaseConnectionState(srcIP string, srcPort uint16, dstI
 
 	entry, ok := p.natTable[key]
 	if !ok {
-		return
+		// For a non-loopback DNAT target the packet reached the stack with
+		// its destination rewritten, so dstIP is the rewritten address while
+		// natTable is keyed by the original one: resolve it via the reverse map.
+		entry, ok = p.reverseNatTable[reverseConnKey{
+			rewrittenTo:     dstIP,
+			originalSrcIP:   srcIP,
+			originalSrcPort: srcPort,
+			originalDstPort: dstPort,
+			proto:           proto,
+		}]
+		if !ok {
+			return
+		}
+		key.dstIP = entry.originalDst.String()
 	}
 	delete(p.natTable, key)
 
@@ -608,8 +621,7 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 		logger.Debug("HandleIncomingPacket: Matched rule for %s -> %s (proto=%d, port=%d, resourceId=%d)",
 			srcAddr, dstAddr, protocol, dstPort, matchedRule.ResourceId)
 
-		// Store resource ID for connections without DNAT as well
-		if matchedRule.ResourceId != 0 && matchedRule.RewriteTo == "" {
+		if matchedRule.RewriteTo == "" {
 			dKey := destKey{
 				srcIP:   srcAddr.String(),
 				dstIP:   dstAddr.String(),
@@ -617,7 +629,13 @@ func (p *ProxyHandler) HandleIncomingPacket(packet []byte) bool {
 				proto:   uint8(protocol),
 			}
 			p.natMu.Lock()
-			p.resourceTable[dKey] = matchedRule.ResourceId
+			// The rule no longer rewrites: drop any rewrite left behind by an
+			// earlier version of it, which the handlers would otherwise prefer.
+			delete(p.destRewriteTable, dKey)
+			// Store resource ID for connections without DNAT as well
+			if matchedRule.ResourceId != 0 {
+				p.resourceTable[dKey] = matchedRule.ResourceId
+			}
 			p.natMu.Unlock()
 		}
 
