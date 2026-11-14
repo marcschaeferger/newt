@@ -21,7 +21,12 @@ import (
 // writeCACertIfNotExists writes contents to path. If the file already exists: when force is false, skip; when force is true, overwrite only if content differs.
 func writeCACertIfNotExists(path, contents string, force bool) error {
 	contents = strings.TrimSpace(contents)
-	if contents != "" && !strings.HasSuffix(contents, "\n") {
+	if contents == "" {
+		// No CA provided (e.g. native mode); never replace an existing CA with an empty file.
+		logger.Debug("auth-daemon: no CA cert provided, leaving %s untouched", path)
+		return nil
+	}
+	if !strings.HasSuffix(contents, "\n") {
 		contents += "\n"
 	}
 	existing, err := os.ReadFile(path)
