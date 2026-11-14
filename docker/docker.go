@@ -332,6 +332,12 @@ func getHostContainer(dockerContext context.Context, dockerClient *client.Client
 // EventCallback defines the function signature for handling Docker events
 type EventCallback func(containers []Container)
 
+// eventReconnectDelay is the initial delay before resubscribing to the Docker
+// event stream after it fails; it doubles up to maxEventReconnectDelay.
+var eventReconnectDelay = 5 * time.Second
+
+const maxEventReconnectDelay = time.Minute
+
 // EventMonitor handles Docker event monitoring
 type EventMonitor struct {
 	client                   *client.Client
@@ -387,11 +393,15 @@ func (em *EventMonitor) Start() error {
 	// eventFilters.Add("event", "pause")
 	// eventFilters.Add("event", "unpause")
 
+	subscribe := func() (<-chan events.Message, <-chan error) {
+		eventsResult := em.client.Events(em.ctx, client.EventsListOptions{
+			Filters: eventFilters,
+		})
+		return eventsResult.Messages, eventsResult.Err
+	}
+
 	// Start listening for events
-	eventsResult := em.client.Events(em.ctx, client.EventsListOptions{
-		Filters: eventFilters,
-	})
-	eventCh, errCh := eventsResult.Messages, eventsResult.Err
+	eventCh, errCh := subscribe()
 
 	go func() {
 		defer func() {
@@ -400,28 +410,33 @@ func (em *EventMonitor) Start() error {
 			}
 		}()
 
+		delay := eventReconnectDelay
 		for {
 			select {
 			case event := <-eventCh:
+				delay = eventReconnectDelay
 				logger.Debug("Docker event received: %s %s for container %s", event.Action, event.Type, event.Actor.ID[:12])
 
 				// Fetch updated container list and trigger callback
 				go em.handleEvent(event)
 
 			case err := <-errCh:
-				if err != nil && err != context.Canceled {
-					logger.Error("Docker event stream error: %v", err)
-					// Try to reconnect after a brief delay
-					time.Sleep(5 * time.Second)
-					if em.ctx.Err() == nil {
-						logger.Info("Attempting to reconnect to Docker event stream")
-						eventsResult = em.client.Events(em.ctx, client.EventsListOptions{
-							Filters: eventFilters,
-						})
-						eventCh, errCh = eventsResult.Messages, eventsResult.Err
-					}
+				// The stream has ended (errCh is closed after the error is
+				// delivered); resubscribe with a capped backoff until stopped.
+				if em.ctx.Err() != nil {
+					logger.Info("Docker event monitoring stopped")
+					return
 				}
-				return
+				logger.Error("Docker event stream error: %v", err)
+				select {
+				case <-time.After(delay):
+				case <-em.ctx.Done():
+					logger.Info("Docker event monitoring stopped")
+					return
+				}
+				delay = min(delay*2, maxEventReconnectDelay)
+				logger.Info("Attempting to reconnect to Docker event stream")
+				eventCh, errCh = subscribe()
 
 			case <-em.ctx.Done():
 				logger.Info("Docker event monitoring stopped")
