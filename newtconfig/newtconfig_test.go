@@ -224,3 +224,33 @@ func TestResolveConfigFilePath_Precedence(t *testing.T) {
 		t.Errorf("expected env path, got %q", got)
 	}
 }
+
+func TestLoadNewtConfig_RejectsInvalidDNS(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.json")
+
+	t.Run("cli", func(t *testing.T) {
+		clearNewtEnv(t)
+		if _, err := Load(Options{Args: []string{"--config-file", missing, "--dns", "dns.quad9.net"}}); err == nil {
+			t.Fatal("expected error for non-IP --dns, got nil")
+		}
+	})
+
+	t.Run("env", func(t *testing.T) {
+		clearNewtEnv(t)
+		t.Setenv("DNS", "not-an-ip")
+		if _, err := Load(Options{Args: []string{"--config-file", missing}}); err == nil {
+			t.Fatal("expected error for non-IP DNS env, got nil")
+		}
+	})
+
+	t.Run("valid ipv6", func(t *testing.T) {
+		clearNewtEnv(t)
+		cfg, err := Load(Options{Args: []string{"--config-file", missing, "--dns", "2620:fe::fe"}})
+		if err != nil {
+			t.Fatalf("Load returned error for valid IPv6 dns: %v", err)
+		}
+		if cfg.DNS != "2620:fe::fe" {
+			t.Errorf("expected dns 2620:fe::fe, got %q", cfg.DNS)
+		}
+	})
+}

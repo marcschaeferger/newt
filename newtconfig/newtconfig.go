@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -691,6 +692,12 @@ func Load(opts Options) (newtpkg.Config, error) {
 		if _, err := network.ParseLocalEndpoint(ep, 0); err != nil {
 			return newtpkg.Config{}, fmt.Errorf("invalid local-endpoints entry: %w", err)
 		}
+	}
+
+	// The DNS server is later passed to netip.MustParseAddr when the tunnel
+	// is created, so reject anything that is not an IP address here.
+	if _, err := netip.ParseAddr(cfg.DNS); err != nil {
+		return newtpkg.Config{}, fmt.Errorf("invalid dns %q: must be an IP address: %w", cfg.DNS, err)
 	}
 
 	// Parse MTU
