@@ -134,11 +134,6 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 	n.client.RegisterHandler("newt/ping/exitNodes", func(msg websocket.WSMessage) {
 		logger.Debug("Received ping message")
 
-		if n.stopFunc != nil {
-			n.stopFunc()
-			n.stopFunc = nil
-		}
-
 		var exitNodeData ExitNodeData
 
 		jsonData, err := json.Marshal(msg.Data)
@@ -158,6 +153,11 @@ func (n *Newt) registerHandlers(ctx context.Context) {
 				return
 			}
 			n.pendingPingChainId = ""
+		}
+
+		if n.stopFunc != nil {
+			n.stopFunc()
+			n.stopFunc = nil
 		}
 
 		if len(exitNodes) == 0 {
